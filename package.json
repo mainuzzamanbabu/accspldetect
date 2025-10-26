@@ -1,0 +1,40 @@
+{
+  "name": "solana-pool-watchers",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "target": "ES2022",
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "strict": true,
+    "skipLibCheck": true
+  },
+  "scripts": {
+    "watch:orca": "tsx src/watchers/watch-orca.ts",
+    "watch:raydium": "tsx src/watchers/watch-raydium.ts",
+    "watch:meteora:dlmm": "tsx src/watchers/watch-meteora-dlmm.ts",
+    "watch:meteora:cpamm": "tsx src/watchers/watch-meteora-cpamm.ts",
+    "watch:meteora:dammv1": "tsx src/watchers/watch-meteora-dammv1.ts",
+    "watch:pumpswap": "tsx src/watchers/watch-pumpswap.ts"
+  },
+  "dependencies": {
+    "@meteora-ag/cp-amm-sdk": "^1.2.3",
+    "@meteora-ag/dlmm": "^1.7.5",
+    "@meteora-ag/dynamic-amm-sdk": "^1.4.1",
+    "@orca-so/whirlpools-sdk": "^0.16.0",
+    "@pump-fun/pump-swap-sdk": "^1.8.0",
+    "@raydium-io/raydium-sdk-v2": "^0.2.30-alpha",
+    "@solana/web3.js": "^1.98.4",
+    "@triton-one/yellowstone-grpc": "^4.0.2",
+    "bs58": "^5.0.0",
+    "dotenv": "^16.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.9.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}
