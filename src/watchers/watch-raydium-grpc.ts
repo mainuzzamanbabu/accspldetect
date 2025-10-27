@@ -1,8 +1,9 @@
 // src/watchers/watch-raydium-grpc.ts
-import * as Yellowstone from "@triton-one/yellowstone-grpc";
 import bs58 from "bs58";
+import { createRequire } from "module";
 
 enum CommitmentLevel {
+  PROCESSED = "processed",
   CONFIRMED = "confirmed",
 }
 
@@ -10,10 +11,10 @@ import { ENV } from "../common/env.js";
 import { jsonlWriter } from "../common/logger.js";
 
 /**
- * --- ENV expectations ---
- * GRPC_ENDPOINT: "solana-yellowstone-grpc.publicnode.com:443"   // NO http(s)://
- * GRPC_TOKEN: "<optional token>"                                // depends on provider
- * RAYDIUM_POOLS: '["poolPubkey1","poolPubkey2"]'  OR  "pool1,pool2"
+ * ENV:
+ *   GRPC_ENDPOINT: solana-yellowstone-grpc.publicnode.com:443     (NO http/https)
+ *   GRPC_TOKEN:    <optional>
+ *   RAYDIUM_POOLS: '["poolPubkey1","poolPubkey2"]'  OR  "pool1,pool2"
  */
 
 // ----------------------------- ENV & Config ------------------------------
@@ -30,6 +31,9 @@ const POOLS: string[] = Array.isArray(rawPools)
   ? rawPools.split(/[,\s]+/).filter(Boolean)
   : [];
 
+// Enable debug/troubleshooting mode by setting ENV.RAYDIUM_DEBUG = true
+const DEBUG = Boolean((ENV as any).RAYDIUM_DEBUG || process.env.RAYDIUM_DEBUG);
+
 function validateEnv() {
   const placeholderEndpoint =
     String(RAW_ENDPOINT).includes("your-endpoint") || !RAW_ENDPOINT;
@@ -37,13 +41,8 @@ function validateEnv() {
     console.error(
       "[raydium-grpc] ERROR: GRPC endpoint not configured or using placeholder."
     );
-    console.error("Set the following environment variable before running:");
     console.error(
-      "  GRPC_ENDPOINT - e.g. 'solana-yellowstone-grpc.publicnode.com:443' (hostname:port, NO https://)"
-    );
-    console.error("Example (PowerShell):");
-    console.error(
-      "  $env:GRPC_ENDPOINT='solana-yellowstone-grpc.publicnode.com:443' ; npx tsx src/watchers/watch-raydium-grpc.ts"
+      "Set GRPC_ENDPOINT to e.g. solana-yellowstone-grpc.publicnode.com:443"
     );
     process.exit(1);
   }
@@ -53,10 +52,10 @@ function validateEnv() {
     String(RAW_ENDPOINT).includes("https://")
   ) {
     console.warn(
-      "[raydium-grpc] WARNING: Endpoint should not include http:// or https:// prefix"
+      "[raydium-grpc] WARNING: Endpoint should not include http(s):// prefix"
     );
     console.warn(
-      "  Use format: hostname:port (e.g., 'solana-yellowstone-grpc.publicnode.com:443')"
+      "Use hostname:port, e.g. 'solana-yellowstone-grpc.publicnode.com:443'"
     );
   }
 
@@ -64,13 +63,9 @@ function validateEnv() {
     console.error(
       "[raydium-grpc] ERROR: No pools specified in ENV.RAYDIUM_POOLS"
     );
-    console.error(
-      "Provide a JSON array or comma-separated list of Raydium pool addresses."
-    );
     process.exit(1);
   }
 }
-
 validateEnv();
 
 const filename = "raydium-grpc.jsonl";
@@ -84,110 +79,62 @@ console.log(
 );
 console.log(`[raydium-grpc] Writing logs → ${writer.path}\n`);
 
-// --------------------------- Target Builder ------------------------------
+// --------------------------- Endpoint Normalizer -------------------------
 
-function buildGrpcTarget(endpoint: string) {
-  // strip protocol + whitespace
-  const noProto = endpoint.trim().replace(/^https?:\/\//i, "");
-  const [host, port = "443"] = noProto.split(":");
-  if (!host) throw new Error(`Invalid GRPC_ENDPOINT: "${endpoint}"`);
-  // Canonical gRPC DNS target (note the triple slash)
-  const target = `dns:///${host}:${port}`;
-  return { target, host, port };
+function normalizeEndpoint(ep: string) {
+  const raw = String(ep || "").trim();
+  // If caller provided an explicit http(s):// URL, keep it as-is.
+  if (/^https?:\/\//i.test(raw)) return raw;
+
+  // If caller provided a dns:/// style address, convert it to an
+  // https:// URL so the Yellowstone client (which uses `new URL(...)`)
+  // parses the hostname/port correctly and creates TLS credentials.
+  if (raw.startsWith("dns:///")) {
+    const host = raw.replace(/^dns:\/\//, "").replace(/^\/+/, "");
+    return `https://${host}`;
+  }
+
+  // No scheme provided: default to HTTPS (most public endpoints use TLS).
+  return `https://${raw}`;
 }
 
-// --------------------------- Client Creation -----------------------------
+// --------------------------- Client Loader -------------------------------
 
-function getClientConstructor() {
-  // Try known export shapes from the package
-  const candidates = [
-    (Yellowstone as any)?.default?.default,
-    (Yellowstone as any)?.default,
-    Yellowstone as any,
-  ].filter(Boolean);
+type YellowstoneCtor = new (
+  endpoint: string,
+  token?: string,
+  opts?: Record<string, any>
+) => any;
 
-  for (const C of candidates) {
-    if (typeof C === "function") return C;
-  }
+async function loadYellowstoneCtor(): Promise<YellowstoneCtor> {
+  // Try ESM default import first (official examples)
+  try {
+    const esm = await import("@triton-one/yellowstone-grpc");
+    const C = (esm as any)?.default || (esm as any)?.Client || (esm as any);
+    if (typeof C === "function") return C as YellowstoneCtor;
+  } catch {}
+  // Fallback to CJS via createRequire
+  try {
+    const req = createRequire(import.meta.url);
+    const cjs = req("@triton-one/yellowstone-grpc");
+    const C = cjs?.default || cjs?.Client || cjs;
+    if (typeof C === "function") return C as YellowstoneCtor;
+  } catch {}
+
   throw new Error("Could not find Yellowstone client constructor");
 }
 
-function createClient(endpoint: string, token?: string) {
-  const { target, host } = buildGrpcTarget(endpoint);
-  const safeToken = token ?? "";
-
-  // gRPC channel options
-  const baseOpts: Record<string, any> = {
-    "grpc.max_receive_message_length": 64 * 1024 * 1024,
-    "grpc.keepalive_time_ms": 10000,
-    "grpc.keepalive_timeout_ms": 5000,
-
-    // Critical for Windows / SNI behind some CDNs
-    "grpc.default_authority": host,
-    // Uncomment the next line only if your provider/SNI requires it
-    // "grpc.ssl_target_name_override": host,
-  };
-
-  console.log(`[raydium-grpc] Using target: ${target}`);
+function createClientCtorLogger(
+  C: YellowstoneCtor,
+  endpoint: string,
+  token?: string
+) {
+  console.log(`[raydium-grpc] Using target: ${endpoint}`);
   console.log(
-    `[raydium-grpc] Token: ${safeToken ? "***" + safeToken.slice(-4) : "none"}`
+    `[raydium-grpc] Token: ${token ? "***" + String(token).slice(-4) : "none"}`
   );
-
-  const ClientConstructor = getClientConstructor();
-
-  // Try a few instantiation patterns (providers differ)
-  const attempts = [
-    {
-      desc: "standard (target, token, opts)",
-      fn: () => new ClientConstructor(target, safeToken, baseOpts),
-    },
-    {
-      desc: "x-token in opts",
-      fn: () => {
-        const opts = { ...baseOpts, "x-token": safeToken };
-        return new ClientConstructor(target, undefined, opts);
-      },
-    },
-    {
-      desc: "no token parameter",
-      fn: () => new ClientConstructor(target, baseOpts),
-    },
-    {
-      desc: "endpoint in opts object",
-      fn: () => {
-        const opts = { ...baseOpts, endpoint: target, token: safeToken };
-        return new ClientConstructor(opts);
-      },
-    },
-  ];
-
-  for (const attempt of attempts) {
-    try {
-      const client = attempt.fn();
-      if (typeof (client as any)?.subscribe === "function") {
-        console.log(
-          `[raydium-grpc] ✓ Client created via pattern: ${attempt.desc}`
-        );
-        return client;
-      }
-    } catch (e: any) {
-      console.log(
-        `[raydium-grpc] ✗ Pattern failed: ${attempt.desc} - ${e?.message || e}`
-      );
-    }
-  }
-
-  throw new Error(
-    "Could not instantiate Yellowstone client with any known pattern."
-  );
+  return C;
 }
-
-const client = createClient(RAW_ENDPOINT, GRPC_TOKEN);
-
-// --------------------------- Helpers -------------------------------------
-
-const MAX_RECONNECT_ATTEMPTS = 10;
-const PING_INTERVAL_MS = 30_000;
 
 function bufferToBase58(buffer: any): string {
   if (!buffer) return "";
@@ -197,13 +144,14 @@ function bufferToBase58(buffer: any): string {
       return bs58.encode(Buffer.from(buffer.data));
     }
     if (Buffer.isBuffer(buffer)) return bs58.encode(buffer);
-  } catch {
-    // ignore
-  }
+  } catch {}
   return "";
 }
 
 // --------------------------- Streaming Logic -----------------------------
+
+const MAX_RECONNECT_ATTEMPTS = 10;
+const PING_INTERVAL_MS = 30_000;
 
 let reconnectAttempts = 0;
 let reconnecting = false;
@@ -211,23 +159,45 @@ let currentStream: any | null = null;
 let pingIntervalId: NodeJS.Timeout | null = null;
 
 interface SubscribeRequest {
-  accounts: { [key: string]: any };
-  slots: { [key: string]: any };
-  transactions: { [key: string]: any };
-  transactionsStatus: { [key: string]: any };
-  blocks: { [key: string]: any };
-  blocksMeta: { [key: string]: any };
-  entry: { [key: string]: any };
-  accountsDataSlice: any[];
+  accounts?: { [k: string]: any };
+  slots?: { [k: string]: any };
+  transactions?: { [k: string]: any };
+  transactionsStatus?: { [k: string]: any };
+  blocks?: { [k: string]: any };
+  blocksMeta?: { [k: string]: any };
+  entry?: { [k: string]: any };
+  accountsDataSlice?: any[];
   ping?: any;
   commitment?: CommitmentLevel;
 }
 
 function startPings(stream: any) {
   stopPings();
-  pingIntervalId = setInterval(() => {
+  pingIntervalId = setInterval(async () => {
     try {
-      stream.write({ ping: { id: Date.now() } } as any);
+      // Use seconds since epoch (int32-safe) for ping id. Sending
+      // millisecond timestamps (Date.now()) can exceed int32 and cause
+      // protobuf serialization failures.
+      const pingId = Math.floor(Date.now() / 1000);
+      if (DEBUG) {
+        try {
+          const mod = await import("@triton-one/yellowstone-grpc");
+          const Ping = (mod as any)?.SubscribeRequestPing;
+          if (Ping && typeof Ping.encode === "function") {
+            const buf = Ping.encode({ id: pingId }).finish();
+            console.log(
+              "[raydium-grpc] DEBUG: ping encodes OK (bytes):",
+              buf.length
+            );
+          }
+        } catch (e: any) {
+          console.error(
+            "[raydium-grpc] DEBUG: ping encoding failed:",
+            e?.message || e
+          );
+        }
+      }
+      stream.write({ ping: { id: pingId } } as any);
     } catch {
       stopPings();
     }
@@ -242,32 +212,120 @@ function stopPings() {
 
 async function startStreaming() {
   try {
-    console.log("[raydium-grpc] Creating subscription stream...");
-    const stream = await client.subscribe();
-    currentStream = stream;
+    const endpoint = normalizeEndpoint(RAW_ENDPOINT);
+    const Yellowstone = await loadYellowstoneCtor();
+    const Client = createClientCtorLogger(Yellowstone, endpoint, GRPC_TOKEN);
 
-    const subscribeRequest: SubscribeRequest = {
-      slots: { slots: {} },
-      accounts: {},
-      transactions: {
-        raydium_pools: {
-          vote: false,
-          failed: false,
-          accountInclude: POOLS,
-          accountExclude: [],
-          accountRequired: [],
-        },
-      },
-      transactionsStatus: {},
-      blocks: {},
-      blocksMeta: {},
-      entry: {},
-      accountsDataSlice: [],
-      ping: { id: 1 },
-      commitment: CommitmentLevel.CONFIRMED,
+    // Keep opts minimal; avoid authority overrides.
+    const opts: Record<string, any> = {
+      "grpc.max_receive_message_length": 64 * 1024 * 1024,
+      "grpc.keepalive_time_ms": 10000,
+      "grpc.keepalive_timeout_ms": 5000,
     };
 
+    const client = new Client(endpoint, GRPC_TOKEN ?? "", opts);
+
+    console.log("[raydium-grpc] Creating subscription stream...");
+    const stream = await (client as any).subscribe();
+    currentStream = stream;
+
+    // Wrap the stream.write method in DEBUG mode to log outgoing payloads
+    // so we can see which message triggers the server-side serialization error.
+    if (DEBUG) {
+      try {
+        const origWrite = (stream as any).write.bind(stream);
+        (stream as any).write = function (obj: any, cb?: any) {
+          try {
+            console.log(
+              "[raydium-grpc] DEBUG WRITING:",
+              JSON.stringify(obj).slice(0, 1500)
+            );
+          } catch {}
+          return origWrite(obj, cb);
+        };
+      } catch {}
+    }
+
+    // Build a full SubscribeRequest. The protobuf encoder expects map fields
+    // like `accounts`, `slots`, `transactionsStatus`, etc. to be objects
+    // (not undefined). If those keys are missing the encoder will attempt
+    // to call Object.entries(undefined) and throw a serialization error
+    // like "Cannot convert undefined or null to object". Provide empty
+    // objects/arrays for the unused fields to avoid that.
+    // If DEBUG is enabled, broaden the transactions filter so we can see
+    // any incoming updates for troubleshooting.
+    const subscribeRequest: SubscribeRequest = DEBUG
+      ? {
+          accounts: {},
+          slots: {},
+          // Broad transactions filter (no accountInclude) to receive many updates
+          transactions: {
+            all: {
+              vote: false,
+              failed: false,
+            },
+          },
+          transactionsStatus: {},
+          blocks: {},
+          blocksMeta: {},
+          entry: {},
+          accountsDataSlice: [],
+          commitment: 0 as any, // PROCESSED
+          ping: { id: 1 },
+        }
+      : {
+          accounts: {},
+          slots: {},
+          transactions: {
+            // Any map key works; this is just a label
+            raydium: {
+              vote: false,
+              failed: false,
+              accountInclude: POOLS,
+              accountExclude: [],
+              accountRequired: [],
+            },
+          },
+          transactionsStatus: {},
+          blocks: {},
+          blocksMeta: {},
+          entry: {},
+          accountsDataSlice: [],
+          commitment: 0 as any, // PROCESSED
+          ping: { id: 1 },
+        };
+
+    if (DEBUG) {
+      console.log(
+        "[raydium-grpc] DEBUG mode enabled — using broad subscription filter"
+      );
+      try {
+        console.log(
+          "[raydium-grpc] DEBUG subscribeRequest:",
+          JSON.stringify(subscribeRequest, null, 2)
+        );
+      } catch {}
+    }
+
     console.log("[raydium-grpc] ✓ Sending subscription request...");
+    if (DEBUG) {
+      try {
+        const mod = await import("@triton-one/yellowstone-grpc");
+        const SubscribeReq = (mod as any)?.SubscribeRequest;
+        if (SubscribeReq && typeof SubscribeReq.encode === "function") {
+          const encoded = SubscribeReq.encode(subscribeRequest).finish();
+          console.log(
+            "[raydium-grpc] DEBUG: subscribeRequest encodes OK (bytes):",
+            encoded.length
+          );
+        }
+      } catch (e: any) {
+        console.error(
+          "[raydium-grpc] DEBUG: subscribeRequest encoding failed:",
+          e?.message || e
+        );
+      }
+    }
     await stream.write(subscribeRequest as any);
     console.log(
       "[raydium-grpc] ✓ Subscription active! Listening for transactions...\n"
@@ -277,12 +335,17 @@ async function startStreaming() {
     startPings(stream);
 
     stream.on("data", (data: any) => {
+      if (DEBUG) {
+        try {
+          // Log a truncated raw update when debugging so we can see what's coming.
+          console.log(
+            "[raydium-grpc] RAW UPDATE:",
+            JSON.stringify(data).slice(0, 2000)
+          );
+        } catch {}
+      }
       try {
-        if (data?.pong) {
-          // Keepalive responses
-          // console.log(`[raydium-grpc] Received pong: ${data.pong.id}`);
-          return;
-        }
+        if (data?.pong) return;
 
         if (data?.transaction) {
           const txEnvelope = data.transaction;
@@ -341,11 +404,9 @@ async function startStreaming() {
               tokenIn: input?.mint,
               tokenOut: output?.mint,
             };
-          } catch {
-            // ignore parsing errors
-          }
+          } catch {}
 
-          // Try to capture the top-level instruction label from logs
+          // Instruction label from logs (best effort)
           let instruction: string | null = null;
           if (meta.logMessages) {
             const logLine = meta.logMessages.find((l: string) =>
@@ -360,7 +421,7 @@ async function startStreaming() {
             }
           }
 
-          // Try to tag which configured pool appeared in account keys
+          // Tag which configured pool appeared in account keys
           const accountKeys = tx.message?.accountKeys || [];
           let poolAddress: string | null = null;
 
@@ -409,9 +470,6 @@ async function startStreaming() {
               `Sig: ${sigBase58.slice(0, 8)}...`
           );
         }
-
-        // Optional slot logging:
-        // if (data?.slot) console.log(`[raydium-grpc] Slot: ${data.slot.slot}`);
       } catch (e: any) {
         console.error("[raydium-grpc] Error processing data:", e?.message || e);
       }
@@ -427,10 +485,23 @@ async function startStreaming() {
     };
 
     stream.on("error", onStreamError("error"));
-    stream.on("end", onStreamError("ended"));
+    // Avoid double reconnect races: don't also handle "end"
     stream.on("close", onStreamError("closed"));
-
-    return stream;
+    // Additional stream lifecycle hooks (helpful when debugging connectivity)
+    try {
+      stream.on("end", () => {
+        console.log("[raydium-grpc] Stream ended");
+        stopPings();
+      });
+    } catch {}
+    try {
+      stream.on("metadata", (m: any) =>
+        console.log("[raydium-grpc] Metadata:", m)
+      );
+    } catch {}
+    try {
+      stream.on("status", (s: any) => console.log("[raydium-grpc] Status:", s));
+    } catch {}
   } catch (error: any) {
     console.error(
       "[raydium-grpc] Failed to start stream:",
@@ -441,14 +512,18 @@ async function startStreaming() {
 }
 
 function attemptReconnect() {
-  if (reconnecting) return; // guard against overlapping timers
+  if (reconnecting) return;
   reconnecting = true;
 
   if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
     console.error(
       "[raydium-grpc] Max reconnection attempts reached. Exiting..."
     );
-    process.exit(1);
+    try {
+      writer.close?.();
+    } finally {
+      process.exit(1);
+    }
   }
 
   reconnectAttempts++;

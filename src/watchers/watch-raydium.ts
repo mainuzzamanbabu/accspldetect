@@ -30,13 +30,13 @@ const commitment: Commitment = ENV.COMMITMENT;
 // // Use Solana's official RPC - most reliable for free tier
 // const HTTP_ENDPOINT = "https://api.mainnet-beta.solana.com";
 // const WSS_ENDPOINT = "wss://api.mainnet-beta.solana.com";
-// const HTTP_ENDPOINT =
-//   "";
-// const WSS_ENDPOINT =
-//   "";
+const HTTP_ENDPOINT =
+  "https://mainnet.helius-rpc.com/?api-key=006ee7a6-cff4-4a4c-8e38-2e153bf2e69d";
+const WSS_ENDPOINT =
+  "wss://mainnet.helius-rpc.com/?api-key=006ee7a6-cff4-4a4c-8e38-2e153bf2e69d";
 
-const HTTP_ENDPOINT = "https://solana-rpc.publicnode.com";
-const WSS_ENDPOINT = "wss://solana-rpc.publicnode.com";
+// const HTTP_ENDPOINT = "https://solana-rpc.publicnode.com";
+// const WSS_ENDPOINT = "wss://solana-rpc.publicnode.com";
 // For better performance, consider premium RPC:
 // Helius: https://mainnet.helius-rpc.com/?api-key=YOUR_KEY
 // QuickNode: Your custom endpoint from quicknode.com
