@@ -13,7 +13,9 @@ export async function fetchTx(
 ): Promise<VersionedTransactionResponse | null> {
   try {
     const tx = await connection.getTransaction(signature, {
-      commitment,
+      // Cast commitment to any to avoid minor type mismatches between
+      // different @solana/web3.js type versions in consumer projects.
+      commitment: commitment as any,
       maxSupportedTransactionVersion: 0,
     });
     return tx;

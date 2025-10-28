@@ -15,6 +15,7 @@
   "scripts": {
     "watch:orca": "tsx src/watchers/watch-orca.ts",
     "watch:raydium": "tsx src/watchers/watch-raydium.ts",
+    "watch:humidifi": "tsx src/watchers/watch-humidifi.ts",
     "watch:meteora:dlmm": "tsx src/watchers/watch-meteora-dlmm.ts",
     "watch:meteora:cpamm": "tsx src/watchers/watch-meteora-cpamm.ts",
     "watch:meteora:dammv1": "tsx src/watchers/watch-meteora-dammv1.ts",
